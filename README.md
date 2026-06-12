@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square&logo=python)](https://www.python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?style=flat-square&logo=pytorch)](https://pytorch.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
-[![Phase](https://img.shields.io/badge/phase-1%20%E2%80%94%20Core%20Engine-brightgreen?style=flat-square)]()
+[![Phase](https://img.shields.io/badge/phase-2%20%E2%80%94%20Wave%20M1%20Transformers-brightgreen?style=flat-square)]()
 
 </div>
 
@@ -254,7 +254,7 @@ clf = Classifier.load("my-bird-net")
 
 ```
 Phase 1  ✅  Core engine + PANNs CNN family (Wave M0)
-Phase 2  🔜  Wave M1 — AST, AudioMAE, HTS-AT, BEATs (transformer taggers)
+Phase 2  ✅  Wave M1 — AST, AudioMAE, HTS-AT, BEATs (transformer taggers)
 Phase 3  ·   Wave M2 — CLAP zero-shot (LAION + MS)
 Phase 4  ·   Embeddings & similarity search
 Phase 5  ·   Sound Event Detection timeline
