@@ -1,0 +1,716 @@
+# XenClassify: AI-First Sound Classification Library
+
+> Working name — placeholder. Other options: XenSense, SonixClassify, AudioTag.
+
+## Vision
+
+A standalone, open-source Python library for sound classification and acoustic
+intelligence that works **out of the box** (one line to classify with a sensible
+default model) yet scales to custom training, real-time streaming, and edge
+deployment.
+
+It is a **separate package** from XenAudio:
+
+* Usable on its own: `pip install xenclassify`
+* Optionally consumed by XenAudio as the engine behind `audio.classify()`,
+  `audio.detect_events()`, and embedding-based search.
+
+## Design Principles
+
+* **Out of the box:** `Classifier.load()` with no args picks a good default,
+  lazily downloads weights, and just works.
+* **Backend-agnostic:** PyTorch for training; ONNX for fast/edge inference.
+* **One result object:** every prediction returns a rich, inspectable result
+  (top-k, scores, timeline, embeddings) — not a raw tensor.
+* **Library + CLI + (later) GUI** share one code path.
+* **Lean core, optional extras:** `pip install xenclassify[clap]`,
+  `[train]`, `[stream]`, `[onnx]`, `[domains]`.
+
+## What "Sound Classification" Covers Here
+
+* Multi-label audio tagging (AudioSet ontology, 527 classes)
+* Zero-shot classification from text labels (CLAP)
+* Sound Event Detection (SED) — frame-level "what happened when"
+* Acoustic scene classification (where it was recorded)
+* Single-label tasks: genre, instrument, emotion, gender/age, language
+* Anomaly / novelty detection (unsupervised)
+
+---
+
+# Phase 1: Core Inference Engine + Model Zoo
+
+## Goal
+
+Load a pretrained model and classify a file in one line, with a clean result API.
+
+### Predict
+
+```python
+from xenclassify import Classifier
+
+clf = Classifier.load("panns-cnn14")   # default if no name given
+result = clf.predict("dog.wav")
+
+result.top(5)          # [(label, score), ...]
+result.label           # single best label
+result.scores          # {label: score, ...}
+result.as_dict()
+```
+
+### Batch
+
+```python
+results = clf.predict(["a.wav", "b.wav", "c.wav"])
+```
+
+### Model Zoo (lazy download + cache)
+
+* PANNs (CNN14)  — strong AudioSet tagging baseline
+* YAMNet         — lightweight, fast, mobile-friendly
+* AST            — Audio Spectrogram Transformer (high accuracy)
+* BEATs / PaSST  — state-of-the-art transformers (optional extra)
+
+> The full set of supported model families (AST, BEATs, PANNs, Wav2Vec2,
+> HuBERT, WavLM, Whisper, CLAP, HTS-AT, AudioMAE, YAMNet) and every checkpoint
+> variation is enumerated in **"Model Support Phases (Shippable Waves)"** below
+> and **"Appendix A: Complete Model Catalog & Variations"** at the end of this
+> document. Phase 1 ships only the CNN taggers (PANNs + YAMNet); transformer
+> taggers, speech SSL backbones, and ASR models land in later waves.
+
+### Technology Stack
+
+* torch, torchaudio
+* numpy
+* huggingface_hub (weight hosting/download)
+
+### Deliverable
+
+```python
+from xenclassify import Classifier
+print(Classifier.load().predict("siren.wav").top(3))
+```
+
+---
+
+# Phase 2: Zero-Shot Classification (CLAP)  ★ differentiator
+
+## Goal
+
+Classify audio into **arbitrary, user-defined labels** with no training, by
+matching audio embeddings against text-prompt embeddings.
+
+### Example
+
+```python
+from xenclassify import ZeroShotClassifier
+
+zs = ZeroShotClassifier.load("clap")
+zs.classify("clip.wav", labels=["dog barking", "car horn", "rain", "music"])
+# -> [("rain", 0.81), ("music", 0.10), ...]
+```
+
+### Why it matters
+
+* No dataset, no fine-tuning — instant custom taxonomies.
+* Prompt engineering for labels ("a recording of {label}").
+* Foundation for XenAudio's flexible `audio.classify(labels=[...])`.
+
+### Technology Stack
+
+* CLAP (LAION / MS-CLAP)
+* transformers
+
+---
+
+# Model Support Phases (Shippable Waves)
+
+> This block expands the model zoo into independently shippable **waves**. Each
+> wave reuses the same `Classifier` / result API where possible, so adding a
+> wave is mostly a new adapter in `models/` plus registry entries — no breaking
+> changes to user code. Waves are ordered by reuse of the existing inference
+> path (cheapest first) and by how directly they extend a capability already in
+> the plan. Full per-checkpoint detail lives in **Appendix A**.
+>
+> The ten requested families group into four output "shapes", which is what
+> drives the wave boundaries:
+>
+> | Shape                                   | Families                                  | Output |
+> |-----------------------------------------|-------------------------------------------|--------|
+> | Spectrogram → AudioSet logits (tagging) | PANNs, YAMNet, AST, BEATs, HTS-AT, AudioMAE | multi-label scores |
+> | Audio–text contrastive (zero-shot)      | CLAP (LAION + MS), HTS-AT as encoder      | similarity to text prompts |
+> | Speech SSL backbones (representations)  | Wav2Vec2, HuBERT, WavLM                   | frame/utterance embeddings → fine-tuned heads |
+> | ASR / speech understanding              | Whisper                                   | transcript + language ID + encoder embeddings |
+
+## Wave M0 — CNN Taggers (= Phase 1 baseline)
+
+* **Models:** PANNs (all CNN/ResNet/MobileNet/Wavegram variants), YAMNet.
+* **Path:** waveform → log-mel → CNN → 527/521-class AudioSet logits.
+* **Why first:** smallest deps (torch + torchaudio + numpy), no `transformers`,
+  CPU-friendly, establishes the `PredictionResult` contract every later wave
+  reuses.
+* **Ships:** `Classifier.load("panns-cnn14").predict("x.wav").top(5)`.
+
+## Wave M1 — Spectrogram-Transformer Taggers  ★ accuracy upgrade
+
+* **Models:** AST, HTS-AT, AudioMAE, BEATs.
+* **Path:** identical to M0 from the user's view (multi-label AudioSet tags);
+  internally a mel-spectrogram → transformer → logits adapter. HF `transformers`
+  covers AST/CLAP-style loading; BEATs and HTS-AT need a thin custom loader for
+  their original checkpoints.
+* **Why this grouping:** all four are drop-in higher-mAP replacements for M0 on
+  the *same* `predict()` API and `527`-class AudioSet ontology — no new result
+  type. Each model is independently shippable; you can release AST first, then
+  HTS-AT, etc., behind the same registry.
+* **Sub-shipping order (by integration ease):**
+  1. **AST** — first-class in `transformers`, trivial to wire.
+  2. **AudioMAE** — ViT-style, HF mirrors exist (`gaunernst/...`).
+  3. **HTS-AT** — Swin-style hierarchical, custom loader; also unlocks SED
+     (Phase 3) and serves as CLAP's audio encoder (reuse in M2).
+  4. **BEATs** — custom loader (Microsoft `unilm` checkpoints on Azure),
+     highest mAP; pairs with its bootstrapped tokenizer for SSL.
+* **Extras:** `pip install xenclassify[transformers]`.
+
+## Wave M2 — Contrastive / Zero-Shot (CLAP family)  ★ = Phase 2 engine
+
+* **Models:** LAION-CLAP (unfused + fused, 630k / 630k-audioset / music /
+  music+speech / music+speech+audioset checkpoints) and MS-CLAP (2022, 2023,
+  clapcap). HTS-AT from M1 is reused as the LAION audio encoder.
+* **Path:** audio embedding ⟷ text-prompt embedding → cosine similarity →
+  ranked arbitrary labels (`ZeroShotClassifier.classify(labels=[...])`).
+* **Why after M1:** reuses HTS-AT; introduces the text encoder + prompt
+  templating; powers Phase 2 and the embeddings in Phase 4.
+* **Extras:** `pip install xenclassify[clap]`.
+
+## Wave M3 — Speech Self-Supervised Backbones
+
+* **Models:** Wav2Vec2 (base/large/robust/XLSR/XLS-R/Conformer), HuBERT
+  (base/large/xlarge + ASR fine-tunes), WavLM (base/base+/large + SV/SD heads).
+* **Path:** waveform → SSL transformer → frame/utterance embeddings. These do
+  **not** emit AudioSet tags directly; they are (a) embedding providers for
+  Phase 4 similarity/few-shot, and (b) fine-tunable backbones for Phase 6
+  speech tasks (emotion/SER, speaker ID & verification, language ID, keyword
+  spotting, age/gender).
+* **Why a separate wave:** different output contract (embeddings, not logits)
+  and different default downstream tasks; mapping them onto `predict()` only
+  makes sense once a task head exists. WavLM is the pick for speaker/diarization;
+  Wav2Vec2/HuBERT for ASR-adjacent and paralinguistics.
+* **Ships incrementally:** first as `clf.embed()` providers (cheap, no head),
+  then as `Trainer(base_model="wav2vec2", ...)` backbones.
+* **Extras:** `pip install xenclassify[speech]`.
+
+## Wave M4 — Whisper / ASR-Derived Understanding
+
+* **Models:** Whisper (tiny→large-v3 + `.en` + large-v3-turbo + distil-whisper).
+* **Path:** log-mel → encoder–decoder → transcript + language ID + word/segment
+  timestamps; the **encoder** also yields audio embeddings usable for
+  classification and retrieval.
+* **Why last:** output modality (text) differs most from the core classifier;
+  best exposed via dedicated `transcribe()` / `detect_language()` plus an
+  `embed()` path, and as a feature source for downstream classifiers.
+* **Extras:** `pip install xenclassify[whisper]`.
+
+> **Net effect on the roadmap:** M0 ≡ Phase 1. M1 slots in right after Phase 1
+> (pure accuracy upgrade, same API). M2 ≡ the Phase 2 engine. M3 feeds Phase 4
+> (embeddings) and Phase 6 (training). M4 is an additive understanding layer.
+> Each wave is a separate optional-extra install, keeping the core lean.
+
+---
+
+# Phase 3: Sound Event Detection (Timeline)
+
+## Goal
+
+Move from "what is in the clip" to "what happened, and when."
+
+### Example
+
+```python
+events = clf.detect_events("street.wav", hop=0.5)
+# [{"label": "siren", "start": 3.0, "end": 6.5, "score": 0.92}, ...]
+```
+
+### Features
+
+* Sliding-window / frame-level inference
+* Per-event onset/offset with confidence
+* Smoothing + threshold tuning to merge fragments
+* Export timeline to JSON / CSV / subtitle-like format
+
+### Technology Stack
+
+* numpy, scipy.signal (windowing, smoothing)
+
+---
+
+# Phase 4: Embeddings & Similarity
+
+## Goal
+
+Expose the model's penultimate layer as reusable audio embeddings.
+
+### Example
+
+```python
+emb = clf.embed("audio.wav")              # np.ndarray
+sims = clf.find_similar("query.wav", corpus="./sounds/", top_k=5)
+```
+
+### Use Cases
+
+* Clustering large sound libraries
+* Duplicate / near-duplicate detection
+* Powers XenAudio Phase 6 (audio search & embeddings)
+* Few-shot classification via nearest-neighbor on embeddings
+
+### Technology Stack
+
+* numpy
+* optional: faiss / hnswlib for fast search
+
+---
+
+# Phase 5: Features, Datasets & Augmentation
+
+## Goal
+
+The building blocks for training and reproducible experiments.
+
+### Feature Extraction
+
+```python
+from xenclassify.features import logmel, mfcc, spectrogram
+X = logmel("audio.wav", n_mels=64)
+```
+
+### Dataset Loaders
+
+* ESC-50, UrbanSound8K, AudioSet, DCASE
+* Generic folder-per-class loader + CSV manifest loader
+
+```python
+from xenclassify.datasets import ESC50, FolderDataset
+ds = ESC50(download=True)
+```
+
+### Augmentation
+
+* Time stretch, pitch shift, gain, add-noise, time/freq masking (SpecAugment),
+  mixup
+* Composable pipeline
+
+### Technology Stack
+
+* torchaudio, librosa (optional), numpy
+
+---
+
+# Phase 6: Training & Fine-Tuning
+
+## Goal
+
+Transfer-learn on custom labels in a few lines.
+
+### Example
+
+```python
+from xenclassify import Trainer
+from xenclassify.datasets import FolderDataset
+
+trainer = Trainer(base_model="ast", dataset=FolderDataset("./my_sounds"))
+model = trainer.fit(epochs=10)
+model.save("my_classifier")
+
+Classifier.load("my_classifier").predict("test.wav")
+```
+
+### Features
+
+* Freeze backbone / fine-tune head, or full fine-tune
+* Class imbalance handling, label smoothing
+* Checkpointing, early stopping, mixed precision
+* Logging hooks (TensorBoard / Weights & Biases optional)
+
+### Technology Stack
+
+* torch, torchmetrics
+* optional: lightning
+
+---
+
+# Phase 7: Evaluation & Explainability
+
+## Goal
+
+Trust and debug predictions.
+
+### Metrics
+
+```python
+report = clf.evaluate(test_dataset)
+report.mAP, report.f1, report.accuracy, report.confusion_matrix()
+```
+
+### Explainability
+
+* Grad-CAM / saliency over the mel-spectrogram (which time-frequency region
+  drove the prediction)
+* Per-class threshold calibration
+
+```python
+clf.explain("audio.wav", label="dog")   # returns heatmap overlay
+```
+
+### Technology Stack
+
+* scikit-learn, matplotlib
+* captum (optional)
+
+---
+
+# Phase 8: Domain Packs
+
+## Goal
+
+Ship ready-to-use specialized classifiers as optional plugins.
+
+### Packs
+
+* **Bioacoustics** — bird / animal species (BirdNET-style)
+* **Industrial** — machine fault / anomaly detection
+* **Security** — gunshot, scream, glass break, alarm
+* **Health** — cough, snore, baby cry, wheeze
+* **Music** — genre, instrument, mood
+* **Speech** — emotion (SER), gender, age, language ID
+
+```python
+from xenclassify.domains import security
+security.detect("cctv_audio.wav")   # ["glass_break", "alarm"]
+```
+
+---
+
+# Phase 9: Streaming / Real-Time
+
+## Goal
+
+Classify live audio from a microphone or stream.
+
+### Example
+
+```python
+from xenclassify import StreamClassifier
+
+with StreamClassifier.load("yamnet") as s:
+    for event in s.listen():        # rolling-window inference
+        print(event.label, event.score)
+```
+
+### Features
+
+* Rolling buffer, configurable window/hop
+* Low-latency lightweight models (YAMNet)
+* Callbacks / generator API
+* Optional WebSocket server for browser clients
+
+### Technology Stack
+
+* sounddevice / pyaudio
+* websockets (optional)
+
+---
+
+# Phase 10: Deployment & Edge Export
+
+## Goal
+
+Run anywhere — server, browser, mobile, microcontroller-class devices.
+
+### Features
+
+* Export to ONNX / TFLite
+* Quantization (int8) for edge
+* Tiny REST/gRPC serving wrapper
+* Pure-ONNX inference path (no torch at runtime)
+
+```python
+clf.export("model.onnx", quantize=True)
+```
+
+### Technology Stack
+
+* onnx, onnxruntime
+* optional: tflite, openvino
+
+---
+
+# Phase 11: XenAudio Integration + Plugin API
+
+## Goal
+
+Make XenClassify the brain behind XenAudio's classification, and let third
+parties register custom classifiers.
+
+### XenAudio side
+
+```python
+from xenaudio import Audio
+
+audio = Audio.load("meeting.mp3")
+audio.classify()                                 # multi-label tags
+audio.classify(labels=["applause", "laughter"])  # zero-shot
+audio.detect_events()                            # timeline
+audio.embed()                                    # embeddings
+```
+
+### Plugin registration
+
+```python
+from xenclassify import register_model
+
+@register_model("my-custom-net")
+class MyNet:
+    ...
+```
+
+---
+
+# Potential Project Structure
+
+```text
+xenclassify/
+│
+├── core/
+│   ├── classifier.py        # Classifier, predict, batch
+│   ├── result.py            # PredictionResult, EventTimeline
+│   └── registry.py          # model zoo + plugin registration
+│
+├── models/                  # one adapter per family (see Appendix A)
+│   ├── _base.py             # shared loader/cache/forward contract
+│   ├── panns.py             # M0
+│   ├── yamnet.py            # M0
+│   ├── ast.py               # M1
+│   ├── beats.py             # M1 (custom loader)
+│   ├── htsat.py             # M1 + M2 (also CLAP audio encoder)
+│   ├── audiomae.py          # M1
+│   ├── wav2vec2.py          # M3
+│   ├── hubert.py            # M3
+│   ├── wavlm.py             # M3
+│   ├── whisper.py           # M4
+│   └── clap.py              # M2 zero-shot (LAION + MS)
+│
+├── features/                # logmel, mfcc, spectrogram
+├── datasets/                # ESC50, UrbanSound8K, AudioSet, loaders
+├── augment/                 # SpecAugment, mixup, etc.
+├── train/                   # Trainer, callbacks, metrics
+├── eval/                    # metrics, explainability
+├── streaming/               # real-time
+├── export/                  # onnx / tflite
+├── domains/                 # bioacoustics, security, health, music...
+├── cli/                     # `xenclassify predict ...`
+└── utils/
+```
+
+---
+
+# Suggested Build Order (MVP-first)
+
+1. **Phase 1 + Wave M0** — core engine + PANNs + YAMNet (CNN taggers). Shippable.
+2. **Wave M1** — transformer taggers (AST → AudioMAE → HTS-AT → BEATs); pure
+   accuracy upgrade on the same `predict()` API, each shippable on its own.
+3. **Phase 2 + Wave M2** — CLAP zero-shot (LAION + MS). Headline feature; reuses
+   HTS-AT from M1. Ship early.
+4. **Phase 4** — embeddings (cheap once models are loaded; unlocks XenAudio search).
+5. **Phase 3** — event detection timeline (PANNs-SED / HTS-AT-DESED heads).
+6. **Wave M3** — speech SSL backbones (Wav2Vec2 / HuBERT / WavLM) as `embed()`
+   providers, then fine-tunable in Phase 6.
+7. **Phase 5 + 6** — datasets/augmentation, then training (turns it into a platform).
+8. **Wave M4** — Whisper (transcription + language ID + encoder embeddings).
+9. **Phase 7** — evaluation + explainability (credibility).
+10. **Phases 8–11** — domain packs, streaming, edge export, XenAudio integration.
+
+---
+
+# Long-Term Goal
+
+Become the **classification + acoustic-intelligence** counterpart to:
+
+* YAMNet / PANNs (tagging)
+* CLAP (zero-shot)
+* BirdNET (domain specialists)
+
+…behind one clean API, usable standalone or as XenAudio's intelligence layer.
+
+## Tagline
+
+**"XenClassify — Teach Machines to Listen."**
+
+---
+
+# Appendix A: Complete Model Catalog & Variations
+
+> Implementation reference for every supported model family and its checkpoints.
+> Columns to capture in the registry per entry: `name` (zoo id) · `family` ·
+> `checkpoint` (HF repo / file / url) · `sample_rate` · `n_classes` /
+> `embed_dim` · `task` · `loader` (`transformers` | `custom` | `tfhub`) ·
+> `extra` (which optional-extra group). mAP/accuracy figures are approximate and
+> for prioritization only — verify against the source repo at implementation.
+> License must be recorded per checkpoint before redistribution/hosting.
+
+## A.1 PANNs — CNN AudioSet Taggers  (Wave M0)
+
+* **Source:** `qiuqiangkong/audioset_tagging_cnn`. **SR:** 32 kHz (plus 16 kHz /
+  8 kHz variants). **Classes:** 527 (AudioSet). **Loader:** custom.
+* **Architectures / checkpoints:**
+  * `Cnn14` (mAP ≈ 0.431) — default baseline; `Cnn14_16k` (≈0.438), `Cnn14_8k`.
+  * `Cnn6` (≈0.343), `Cnn10` (≈0.380).
+  * `ResNet22`, `ResNet38` (≈0.434), `ResNet54`.
+  * `MobileNetV1` (≈0.389), `MobileNetV2` (≈0.383) — edge/mobile.
+  * `Wavegram_Cnn14`, `Wavegram_Logmel_Cnn14` (≈0.439) — learnable waveform
+    front-end (no fixed mel).
+  * `Res1dNet31`, `Res1dNet51`, `DaiNet`, `LeeNet11`, `LeeNet24` — 1-D conv nets.
+  * **SED heads:** `Cnn14_DecisionLevelMax` / `_DecisionLevelAtt` /
+    `_DecisionLevelAvg` — frame-level outputs → feeds Phase 3.
+  * **Transfer fine-tunes:** GTZAN (genre), ESC-50, etc.
+* **Tasks:** multi-label tagging; SED variants for timeline.
+
+## A.2 YAMNet — Lightweight Tagger  (Wave M0)
+
+* **Source:** Google (TF-Hub); use ONNX/TFLite conversion for torch-free path.
+  **SR:** 16 kHz. **Classes:** 521 (AudioSet). **Backbone:** MobileNetV1.
+* **Variants:** single canonical model; TFLite (quantized, mobile) and ONNX
+  exports. Default low-latency model for Phase 9 streaming.
+
+## A.3 AST — Audio Spectrogram Transformer  (Wave M1)
+
+* **Source:** HF `MIT/*`. **Loader:** `transformers`
+  (`ASTForAudioClassification`). **SR:** 16 kHz, 128 mel bins.
+* **Checkpoints (patch tstride-fstride encoded in name; lower stride = more
+  overlap = higher mAP, slower):**
+  * `MIT/ast-finetuned-audioset-10-10-0.4593` — **default**, AudioSet 527, mAP ≈0.459.
+  * `MIT/ast-finetuned-audioset-10-10-0.450`, `...-10-10-0.448`, `...-10-10-0.448-v2`.
+  * `MIT/ast-finetuned-audioset-12-12-0.447`, `...-14-14-0.443`, `...-16-16-0.442`.
+  * `MIT/ast-finetuned-speech-commands-v2` — 35 keyword classes.
+* **Variant family:** **SSAST** (self-supervised AST; patch- and frame-based;
+  tiny/small/base) for pretraining without labels → fine-tune in Phase 6.
+
+## A.4 BEATs — Bootstrapped Audio Transformer  (Wave M1)
+
+* **Source:** Microsoft `unilm/beats` (checkpoints on Azure blob; mirrors on HF).
+  **Loader:** custom. **SR:** 16 kHz. **Classes:** 527 (fine-tuned).
+* **Checkpoints:**
+  * `BEATs_iter1`, `BEATs_iter2`, `BEATs_iter3` — SSL pretrained (each iter
+    re-bootstraps the acoustic tokenizer).
+  * `BEATs_iter3+ (AS20K)`, `BEATs_iter3+ (AS2M)` — improved pretrain.
+  * Fine-tuned tagging: `BEATs_iter3 (cpt1/cpt2)` and
+    `BEATs_iter3+ (AS2M) (cpt1/cpt2)` — top mAP ≈0.486.
+  * Companion **tokenizer** checkpoints (for SSL / Phase 6 pretraining).
+* **Note:** README download links rot — pin exact Azure URLs at integration.
+
+## A.5 HTS-AT — Hierarchical Token-Semantic Transformer  (Waves M1 + M2)
+
+* **Source:** `RetroCirce/HTS-Audio-Transformer`. **Loader:** custom.
+  **Backbone:** Swin-style hierarchical windows (35% params / 15% train time
+  vs. plain AST). **SR:** 32 kHz (config-dependent).
+* **Checkpoints:** AudioSet (mAP ≈0.471), ESC-50 (per-fold, acc ≈97%), Speech
+  Command V2, **DESED** (SED / event localization → Phase 3).
+* **Dual role:** standalone tagger **and** the audio encoder inside LAION-CLAP
+  (reused in Wave M2).
+
+## A.6 AudioMAE — Masked Autoencoders that Listen  (Wave M1)
+
+* **Source:** `facebookresearch/AudioMAE`; HF mirrors
+  `gaunernst/vit_base_patch16_1024_128.audiomae_as2m[_ft_as20k]`.
+  **Loader:** custom / `timm`-style ViT. **SR:** 16 kHz, 128 mel.
+* **Checkpoints:**
+  * **SSL pretrained:** ViT-Base patch16, AS2M (encoder-decoder, high mask ratio,
+    local-window decoder attention) — backbone for Phase 6.
+  * **Fine-tuned:** AS2M→AS20K (mAP ≈37 on AS20K), AS2M (mAP ≈47.3).
+  * ViT-Large variants where released.
+* **Tasks:** SSL representation + fine-tuned tagging.
+
+## A.7 Wav2Vec2 — Speech SSL Backbone  (Wave M3)
+
+* **Source:** HF `facebook/*`. **Loader:** `transformers`. **SR:** 16 kHz.
+  **Output:** frame embeddings (no AudioSet head by default).
+* **Checkpoints:**
+  * `wav2vec2-base`, `wav2vec2-base-960h` (ASR fine-tune).
+  * `wav2vec2-large`, `wav2vec2-large-960h`, `-960h-lv60`, `-960h-lv60-self`.
+  * `wav2vec2-large-robust` — noisy/diverse domains.
+  * `wav2vec2-large-xlsr-53` — 53-language multilingual.
+  * **XLS-R:** `wav2vec2-xls-r-300m`, `-1b`, `-2b` — 128 languages.
+  * **Conformer:** `wav2vec2-conformer-rel-pos-large`, `-rope-large`.
+* **Downstream (Phase 6):** SER/emotion, language ID, keyword spotting, ASR.
+
+## A.8 HuBERT — Hidden-Unit BERT  (Wave M3)
+
+* **Source:** HF `facebook/*` (+ `superb/*` task heads). **Loader:**
+  `transformers`. **SR:** 16 kHz.
+* **Checkpoints:**
+  * `hubert-base-ls960`, `hubert-large-ll60k`, `hubert-xlarge-ll60k` (SSL).
+  * ASR fine-tunes: `hubert-large-ls960-ft`, `hubert-xlarge-ls960-ft`.
+  * SUPERB task heads (emotion, speaker ID) under `superb/hubert-*`.
+* **Use:** strong paralinguistic / SER backbone.
+
+## A.9 WavLM — Speech SSL (speaker-aware)  (Wave M3)
+
+* **Source:** HF `microsoft/*`. **Loader:** `transformers`. **SR:** 16 kHz.
+* **Checkpoints:**
+  * `wavlm-base`, `wavlm-base-plus`, `wavlm-large`.
+  * `wavlm-base-plus-sv` — speaker **verification** head.
+  * `wavlm-base-plus-sd` — speaker **diarization** head.
+* **Use:** best of the SSL trio for speaker verification / diarization /
+  overlapped speech.
+
+## A.10 Whisper — ASR & Speech Understanding  (Wave M4)
+
+* **Source:** HF `openai/*` (+ `distil-whisper/*`). **Loader:** `transformers`.
+  **SR:** 16 kHz (log-mel 80; large-v3 uses 128). **Languages:** 99.
+* **Checkpoints:**
+  * `tiny` / `tiny.en`, `base` / `base.en`, `small` / `small.en`,
+    `medium` / `medium.en` (`.en` = English-only, faster).
+  * `large`, `large-v2`, `large-v3`, `large-v3-turbo` (fast decoder).
+  * **Distil-Whisper:** `distil-small.en`, `distil-medium.en`,
+    `distil-large-v2`, `distil-large-v3` — ~2× faster, near-parity.
+* **Outputs:** transcript, language ID, word/segment timestamps, **encoder
+  embeddings** (use as features for classification / retrieval).
+
+## A.11 CLAP — Contrastive Language-Audio Pretraining  (Wave M2)
+
+### LAION-CLAP  (`LAION-AI/CLAP`; HF `laion/*`; `pip install laion-clap`)
+
+* **Loader:** `transformers` (`ClapModel`) or `laion_clap`. **SR:** 48 kHz.
+  **Audio enc:** HTSAT-base (or PANN). **Text enc:** RoBERTa.
+* **HF checkpoints:** `laion/clap-htsat-unfused`, `laion/clap-htsat-fused`
+  (feature fusion → handles variable-length / long audio).
+* **Original `.pt` checkpoints:** `630k-best`, `630k-audioset-best`,
+  `630k-fusion-best`, `630k-audioset-fusion-best`,
+  `music_audioset_epoch_15_esc_90.14.pt` (ESC-50 ≈90.1%),
+  `music_speech_epoch_15_esc_89.25.pt`,
+  `music_speech_audioset_epoch_15_esc_89.98.pt`.
+
+### MS-CLAP  (`microsoft/CLAP`; HF `microsoft/msclap`; `pip install msclap`)
+
+* **Loader:** `msclap` or `transformers`. **SR:** 44.1 kHz.
+* **Versions:**
+  * `2022` (`CLAP_weights_2022.pth`) — CNN14 audio enc + BERT text enc.
+  * `2023` — HTSAT audio enc + GPT-2 text enc (stronger; default).
+  * `clapcap` — audio **captioning** head built on the 2023 encoders.
+* **Use:** zero-shot classification, audio↔text retrieval, captioning.
+
+## A.12 Registry / Naming Convention
+
+Suggested zoo-id scheme so users select variants unambiguously:
+
+```text
+<family>-<arch/size>[-<dataset/sr>]    e.g.
+  panns-cnn14            panns-cnn14-16k        panns-wavegram-logmel
+  ast-10-10              ast-16-16              ast-speechcommands
+  beats-iter3plus-as2m   htsat-audioset         audiomae-base-as2m
+  wav2vec2-large-xlsr    hubert-large-ll60k     wavlm-base-plus-sv
+  whisper-large-v3       whisper-distil-large-v3
+  clap-laion-fused       clap-laion-music       clap-ms-2023
+```
+
+`Classifier.load()` (no arg) → `panns-cnn14`. Each entry declares its required
+optional-extra so an informative error tells the user exactly what to
+`pip install` when a checkpoint's deps are missing.

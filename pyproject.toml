@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "audiotimm"
+version = "0.1.0"
+description = "The model hub for audio intelligence — timm for audio classification"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["audio", "classification", "deep-learning", "sound", "machine-learning", "audiotimm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+dependencies = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "numpy>=1.24",
+    "huggingface_hub>=0.20",
+    "torchlibrosa>=0.1.0",
+]
+
+[project.optional-dependencies]
+transformers = ["transformers>=4.35"]
+clap = ["transformers>=4.35", "laion-clap>=1.1.0"]
+speech = ["transformers>=4.35"]
+whisper = ["transformers>=4.35"]
+train = ["torchmetrics>=1.0", "tqdm>=4.0"]
+onnx = ["onnxruntime>=1.16", "onnx>=1.14"]
+stream = ["sounddevice>=0.4"]
+domains = []
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "tqdm>=4.0",
+]
+
+[project.scripts]
+audiotimm = "audiotimm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["audiotimm*"]
+
+[tool.setuptools.package-data]
+audiotimm = ["data/*.csv", "data/*.json"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
