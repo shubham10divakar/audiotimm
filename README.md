@@ -6,6 +6,8 @@
 
 *`timm` for audio — one registry, every architecture, one clean API.*
 
+[![PyPI](https://img.shields.io/pypi/v/audiotimm?style=flat-square&color=orange&label=PyPI)](https://pypi.org/project/audiotimm/)
+[![Downloads](https://img.shields.io/pypi/dm/audiotimm?style=flat-square&label=downloads%2Fmonth&color=blue)](https://pypi.org/project/audiotimm/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square&logo=python)](https://www.python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?style=flat-square&logo=pytorch)](https://pytorch.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
