@@ -11,7 +11,8 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square&logo=python)](https://www.python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?style=flat-square&logo=pytorch)](https://pytorch.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
-[![Phase](https://img.shields.io/badge/phase-2%20%E2%80%94%20Wave%20M1%20Transformers-brightgreen?style=flat-square)]()
+[![Version](https://img.shields.io/badge/version-1.0.0-blueviolet?style=flat-square)]()
+[![Phase](https://img.shields.io/badge/v1.0.0%20%E2%80%94%20stable-brightgreen?style=flat-square)]()
 
 </div>
 
@@ -127,20 +128,65 @@ clf = Classifier.load("panns-cnn14-16k")
 ### CLI
 
 ```bash
-# Classify a file
-audiotimm predict siren.wav --top 5
+# ── predict ──────────────────────────────────────────────────────────────
+# Basic classification
+audiotimm predict siren.wav
 
-# JSON output
+# Top-10 results
+audiotimm predict siren.wav --top 10
+
+# Show only labels above a confidence threshold
+audiotimm predict siren.wav --threshold 0.3
+
+# Use a specific model
+audiotimm predict siren.wav --model ast-10-10
+
+# Batch — processes all files, shows per-file results
+audiotimm predict audio/*.wav --model panns-cnn14
+
+# JSON output (single file or batch)
 audiotimm predict siren.wav --json
+audiotimm predict audio/*.wav --json --output results.jsonl
 
-# Batch
-audiotimm predict *.wav --model panns-cnn14-16k
+# Run on GPU
+audiotimm predict siren.wav --model beats-iter3plus-as2m-cpt2 --device cuda
 
-# List all available models
+# ── embed ─────────────────────────────────────────────────────────────────
+# Print embedding stats to stdout
+audiotimm embed dog.wav
+
+# Save single embedding as .npy
+audiotimm embed dog.wav --output dog.npy
+
+# Save batch as compressed .npz  (keys = file stems)
+audiotimm embed audio/*.wav --output embeddings.npz
+
+# Save as CSV (filename, dim_0, dim_1, …)
+audiotimm embed audio/*.wav --output embeddings.csv
+
+# ── list / info ───────────────────────────────────────────────────────────
+# List all models
 audiotimm list
 
-# Filter by wave
+# Filter by wave or task
 audiotimm list --wave M1
+audiotimm list --task tagging
+audiotimm list --family beats
+
+# Machine-readable JSON
+audiotimm list --json
+
+# Detailed card for one model
+audiotimm info beats-iter3plus-as2m-cpt2
+audiotimm info ast-10-10
+
+# ── benchmark ─────────────────────────────────────────────────────────────
+# Time 20 inference runs and print mean/median/min/max/std
+audiotimm benchmark siren.wav --model panns-cnn14 --runs 20
+audiotimm benchmark siren.wav --model ast-10-10 --device cuda
+
+# ── version ───────────────────────────────────────────────────────────────
+audiotimm --version
 ```
 
 ---

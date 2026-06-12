@@ -1,0 +1,5 @@
+include README.md
+include PLAN.md
+include pyproject.toml
+recursive-include audiotimm/data *
+recursive-include tests *.py
